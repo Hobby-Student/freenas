@@ -374,37 +374,71 @@ install_loader()
     return 0
 }
 
+nasdb()
+{
+    local _mnt=$1
+    local _query=$2
+
+    chroot "${_mnt}" /usr/local/bin/sqlite3 /data/freenas-v1.db "${_query}"
+}
+
+videoconsole()
+{
+    if [ "$BOOTMODE" = "UEFI" ]; then
+	echo efi
+    else
+	echo vidconsole
+    fi
+}
+
 save_serial_settings()
 {
-    _mnt="$1"
+    local _mnt="$1"
 
-    # If the installer was booted with serial mode enabled, we should
-    # save these values to the installed system
-    USESERIAL=$((`sysctl -n debug.boothowto` & 0x1000))
-    if [ "$USESERIAL" -eq 0 ] ; then return 0; fi
+    local RB_SERIAL=0x1000
+    local RB_MULTIPLE=0x20000000
 
-    # BIOS has vidconsole, UEFI has efi.
-    if [ "$BOOTMODE" = "UEFI" ] ; then
-       videoconsole="efi"
-    else
-       videoconsole="vidconsole"
+    local VIDEO_ONLY=0
+    local SERIAL_ONLY=$((RB_SERIAL))
+    local VID_SER_BOTH=$((RB_MULTIPLE))
+    local SER_VID_BOTH=$((RB_SERIAL | RB_MULTIPLE))
+    local CON_MASK=$((RB_SERIAL | RB_MULTIPLE))
+
+    local _boothowto=$(sysctl -n debug.boothowto)
+
+    # If the installer was booted with multicons/serial mode enabled,
+    # we should save these values to the installed system.
+    case $((_boothowto & CON_MASK)) in
+    $VIDEO_ONLY|$SERIAL_ONLY)
+	return 0
+	;;
+    $VID_SER_BOTH)
+	cat >> ${_mnt}/boot/loader.conf.local <<EOF
+boot_multicons="YES"
+console="$(videoconsole),comconsole"
+EOF
+	;;
+    $SER_VID_BOTH)
+	cat >> ${_mnt}/boot/loader.conf.local <<EOF
+boot_multicons="YES"
+boot_serial="YES"
+console="comconsole,$(videoconsole)"
+EOF
+	;;
+    esac
+
+    local _port=$(kenv hw.uart.console | sed -En 's/.*io:([0-9a-fx]+).*/\1/p')
+    if [ -n "${_port}" ] ; then
+	nasdb ${_mnt} "update system_advanced set adv_serialport = '${_port}'"
     fi
 
-    # Enable serial/internal for BSD loader
-    echo 'boot_multicons="YES"' >> ${_mnt}/boot/loader.conf
-    echo 'boot_serial="YES"' >> ${_mnt}/boot/loader.conf
-    echo "console=\"comconsole,${videoconsole}\"" >> ${_mnt}/boot/loader.conf
+    local _speed=$(kenv hw.uart.console | sed -En 's/.*br:([0-9]+).*/\1/p')
+    if [ -n "${_speed}" ] ; then
+	echo "comconsole_speed=\"${_speed}\"" >> ${_mnt}/boot/loader.conf.local
+	nasdb ${_mnt} "update system_advanced set adv_serialspeed = ${_speed}"
+    fi
 
-    chroot ${_mnt} /usr/local/bin/sqlite3 /data/freenas-v1.db "update system_advanced set adv_serialconsole = 1"
-    SERIALSPEED=`kenv hw.uart.console | sed -En 's/.*br:([0-9]+).*/\1/p'`
-    if [ -n "$SERIALSPEED" ] ; then
-       echo "comconsole_speed=\"$SERIALSPEED\"" >> ${_mnt}/boot/loader.conf
-       chroot ${_mnt} /usr/local/bin/sqlite3 /data/freenas-v1.db "update system_advanced set adv_serialspeed = $SERIALSPEED"
-    fi
-    SERIALPORT=`kenv hw.uart.console | sed -En 's/.*io:([0-9a-fx]+).*/\1/p'`
-    if [ -n "$SERIALPORT" ] ; then
-       chroot ${_mnt} /usr/local/bin/sqlite3 /data/freenas-v1.db "update system_advanced set adv_serialport = '$SERIALPORT'"
-    fi
+    nasdb ${_mnt} "update system_advanced set adv_serialconsole = 1"
 }
 
 mount_disk()
